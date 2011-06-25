@@ -3,6 +3,7 @@ use strict;
 use LWP::UserAgent;
 use HTML::LinkExtractor;
 use Data::Dumper;
+use IO::File;
 use Posix qw(strftime);
 
 my %unvisited;
@@ -17,25 +18,29 @@ my $logfile = "log.$time.txt";
 
 ######################################################################
 
+# Logfile trace function
 {
-    die "Couldn't open logfile $logfile: $!" unless open LOG, ">$logfile";
-    END { close LOG; }
-    
-    # this writes to the log
-    my $loglevel = 0;
-    my $displevel = 1;
+    die "Couldn't open logfile $logfile: $!"
+        unless my $log = IO::File->open(">$logfile");
+
+    # These set the log level
+    my $loglevel = 0;  # what goes into the log
+    my $displevel = 1; # What get printed
+
+    # This writes to the log
     sub trace
     {
         my $level = shift;
-        print @_ if $level >= $displevel;
-        print LOG @_ if $level >= $loglevel;
+        print @_ 
+            if $level >= $displevel;
+        print {$log} @_
+            if $level >= $loglevel;
     }
 }
 
 ######################################################################
 
-if (!@ARGV or $ARGV[0] =~ /^(--help|-h)$/)
-{
+if (!@ARGV or $ARGV[0] =~ /^(--help|-h)$/) {
     die <<USAGE;
 This script spiders web links, starting from URLs list as commandline
 arguments, or if the first argument is a filename, URLs listed in that
@@ -60,21 +65,24 @@ USAGE
 }
 
 my @seeds = @ARGV;
-die "No base URL specified\n" unless @seeds;
+die "No base URL specified\n"
+    unless @seeds;
 
 
 trace 0, "command line:\n$0 @ARGV\n\n";
 
-# first get the seed urls specified, either from the command line
+# First get the seed urls specified, either from the command line
 # or from the config file ...
 
-if ($seeds[0] !~ /^http:/)
-{ # perhaps this is a config file?
-    die "Argument is neither a base URL nor a valid config file\n" unless -f $seeds[0];
+if ($seeds[0] !~ /^http:/) {
+    # perhaps this is a config file?
+    die "Argument is neither a base URL nor a valid config file\n"
+        unless -f $seeds[0];
 
-    open CONFIG, "<$seeds[0]" or die "Couldn't open confile file $seeds[0]: $!\n";
-    @seeds = <CONFIG>; 
-    close CONFIG;
+    open my $config, "<", "$seeds[0]"
+        or die "Couldn't open confile file $seeds[0]: $!\n";
+    $seeds = <$config>; 
+    close $config;
 
     chomp @seeds;
     print "interpreting argument 1 as config file and ignoring spurious arguments\n"
@@ -83,41 +91,36 @@ if ($seeds[0] !~ /^http:/)
 
 my $base = shift @seeds;
 print "using the base URL:\n$base\n";
-if (@seeds)
-{
+if (@seeds) {
     print "using the seed URLs:\n", join "\n",@seeds;
 }
-else
-{
+else {
     print "no seed URLs";
 }
 print "\n\n";
 
 ######################################################################
 
-
-$unvisited{$_}++ foreach $base, @seeds;
+# Mark all the seed URLs unvisited, to kick things off
+$unvisited{$_}++
+    foreach $base, @seeds;
 
 
 ######################################################################
 
-
-
-
-# this defines the get_links sub plus some private globals
+# This defines the get_links sub plus some private globals
 {
     my $ua = LWP::UserAgent->new;
     $ua->cookie_jar({ file => "$ENV{PWD}/.cookies.txt" });
     push @{ $ua->requests_redirectable }, 'POST';
     
-    my $LX = new HTML::LinkExtractor();
+    my $LX = HTML::LinkExtractor->new();
     
     # $content = get_page $url
     #
-    # retrieves the page from the url given.
+    # Retrieves the page from the url given.
     # if the link is broken, throws and exception
-    sub get_page
-    {
+    sub get_page {
         my $url = shift;
 
         # Create a request
@@ -135,67 +138,62 @@ $unvisited{$_}++ foreach $base, @seeds;
 
     # @links = get_links $page_content
     #
-    # returns a ref to an array of links.
+    # Returns a ref to an array of links.
     # $link = { href => $href, _TEXT => $text}
-    sub get_links
-    {
+    sub get_links {
         my $content = shift;
         $LX->parse(\$content);
         return $LX->links;
     }
 }
 
-# this decides if a link should be spidered or just validated
-sub is_in_scope
-{
+# This decides if a link should be spidered or just validated
+sub is_in_scope {
     shift =~ /^$base/;
 }
 
-# this decides if a link should be validated or not
-sub is_readable
-{
+# This decides if a link should be validated or not
+sub is_readable {
     shift =~ /^https?:/;
 }
 
 
-# this loops over the unvisited urls, adding more as they're found,
+# This loops over the unvisited urls, adding more as they're found,
 # and removing them when visited.
-while(%unvisited)
-{
+while(%unvisited) {
     my @keys = keys %unvisited;
     trace 1,  "pages pending: ".@keys."\n";
 
-    foreach my $url (@keys)
-    {
-        # remove this link from the 'unvisited' list
+    foreach my $url (@keys) {
+        # Remove this link from the 'unvisited' list
         delete $unvisited{$url};
 
-        # and add it to the 'visited' list, unless it's there already,
+        # And add it to the 'visited' list, unless it's there already,
         # in which case we can skip it
         next if $visited{$url}++;
 
-        # we don't validate non-http links (i.e. ftp://, mailto: etc.)
+        # We don't validate non-http links (i.e. ftp://, mailto: etc.)
         trace 0,  "skipping (not readable): $url\n" and next
             unless is_readable $url;
 
-        # pause so as not to overload the server
-        sleep $delay if $delay;
+        # Pause so as not to overload the server
+        sleep $delay
+            if $delay;
 
-        # get the page - list the link as broken if this fails
+        # Get the page - list the link as broken if this fails
         # if the page is in scope, spider its links
         trace 0, "--------\n";
         trace 1, "getting $url... ";
-        eval 
-        { 
+        eval {
             my $content = get_page $url;
 
-            # we don't follow links outside of the base URL
+            # We don't follow links outside of the base URL
 #            trace 0,  "skipping (outside of base URL): $href\n";
             $links = is_in_scope($url)?
                 get_links($content) : []; 
-        };
-        if ($@) # catch exceptions
-        {
+            1;
+        }
+        or do { # catch exceptions
             trace 1,  "FAILED:\n$@\n";
             push @broken, $url;
             next;
@@ -203,23 +201,23 @@ while(%unvisited)
 
         trace 1,  " OK\n";
 
-        # now process these links
-        foreach my $link (@$links)
-        {
-            # get the URL
+        # Now process these links
+        foreach my $link (@$links) {
+            # Get the URL
             my $href = $link->{href} || $link->{src};
             next unless $href;
 
-            # convert the URL into a canonical URL
+            # Convert the URL into a canonical URL
             $href = URI->new($href)->abs($url)->canonical;
             $href =~ s!#[^/]*$!!; # remove section links.
 
-            # add links to the list of links still to follow
+            # Add links to the list of links still to follow
             push @{ $referrers{$href} }, $url;
 
 #            trace 0,  Dumper $link;#
             trace 0,  "found: $href ";
-            trace 0, ("(visited)\n") and next if $visited{$href};
+            trace 0, ("(visited)\n") and next
+                if $visited{$href};
             ++$unvisited{$href};
             trace 0,  "\n";
         }
@@ -230,21 +228,18 @@ while(%unvisited)
 
 trace 1,  "Done, no more links\n";
 
-# convert the broken list, with hindsight, to a list
+# Convert the broken list, with hindsight, to a list
 # of pages linking to broken ones.
 my %defects;
-foreach my $link (@broken)
-{
+foreach my $link (@broken) {
     my $referrers = $referrers{$link};
     $defects{$_}{$link}++ foreach @$referrers;
 }
 
-foreach my $page (sort keys %defects)
-{
+foreach my $page (sort keys %defects) {
     trace 1,  "Links broken in $page:\n";
     my $defects = $defects{$page};
-    foreach my $link (sort keys %$defects) 
-    {
+    foreach my $link (sort keys %$defects) {
         my $errors = $defects->{$link};
         foreach my $type (sort keys %$errors) {
             my $count = $errors->{$type};
