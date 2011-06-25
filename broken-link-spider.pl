@@ -31,7 +31,7 @@ my $logfile = "log.$time.txt";
     sub trace
     {
         my $level = shift;
-        print @_ 
+        print @_
             if $level >= $displevel;
         print {$log} @_
             if $level >= $loglevel;
@@ -47,7 +47,7 @@ arguments, or if the first argument is a filename, URLs listed in that
 file, one per line.
 
 The first URL is considerd the 'base' and the spider will not search pages
-which lie outside this root URL.  The others are just used as extra starting 
+which lie outside this root URL.  The others are just used as extra starting
 points.
 
 Forms will not be submitted and javascript links are not followed - so
@@ -81,7 +81,7 @@ if ($seeds[0] !~ /^http:/) {
 
     open my $config, "<", "$seeds[0]"
         or die "Couldn't open confile file $seeds[0]: $!\n";
-    $seeds = <$config>; 
+    $seeds = <$config>;
     close $config;
 
     chomp @seeds;
@@ -113,9 +113,9 @@ $unvisited{$_}++
     my $ua = LWP::UserAgent->new;
     $ua->cookie_jar({ file => "$ENV{PWD}/.cookies.txt" });
     push @{ $ua->requests_redirectable }, 'POST';
-    
+
     my $LX = HTML::LinkExtractor->new();
-    
+
     # $content = get_page $url
     #
     # Retrieves the page from the url given.
@@ -125,7 +125,7 @@ $unvisited{$_}++
 
         # Create a request
         my $req = HTTP::Request->new(GET => $url);
-        
+
         # Pass request to the user agent and get a response back
         my $res = $ua->request($req);
 
@@ -190,7 +190,7 @@ while(%unvisited) {
             # We don't follow links outside of the base URL
 #            trace 0,  "skipping (outside of base URL): $href\n";
             $links = is_in_scope($url)?
-                get_links($content) : []; 
+                get_links($content) : [];
             1;
         }
         or do { # catch exceptions
@@ -221,7 +221,7 @@ while(%unvisited) {
             ++$unvisited{$href};
             trace 0,  "\n";
         }
-        
+
         trace 0,  "\n";
     }
 }
