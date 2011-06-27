@@ -4,30 +4,43 @@ use LWP::UserAgent;
 use HTML::LinkExtractor;
 use Data::Dumper;
 use IO::File;
-use Posix qw(strftime);
+use POSIX qw(strftime);
+use Cwd qw(getcwd);
+use Getopt::Long;
+
+######################################################################
+# Global variables.
 
 my %unvisited;
 my %visited;
 my %referrers;
 my @broken;
-my $links;
-my $delay = 1; # min seconds of delay beween each URL downloaded.
-my $time = strftime "%F-%H%M", localtime;
-my $logfile = "log.$time.txt";
+my @exclusions; # regexps for links to ignore
+my $delay = 0; # min seconds of delay beween each URL downloaded.
+my $timestamp = timestamp();
+my $logfile = "log.$timestamp.txt";
+my $ua = LWP::UserAgent->new;
+$ua->cookie_jar({ file => getcwd . ".cookies.txt" });
+push @{ $ua->requests_redirectable }, qw(HEAD POST GET);
+
+my $lx = HTML::LinkExtractor->new();
 
 
 ######################################################################
+# Functions
 
-# Logfile trace function
+# trace() (and associated variables)
 {
     die "Couldn't open logfile $logfile: $!"
-        unless my $log = IO::File->open(">$logfile");
+        unless my $log = IO::File->new(">$logfile");
 
-    # These set the log level
-    my $loglevel = 0;  # what goes into the log
+    # These set the log level. Low numbers are more verbose.
+    my $loglevel = 0;  # What goes into the log
     my $displevel = 1; # What get printed
 
-    # This writes to the log
+    # trace @strings
+    #
+    # Logfile trace function, prints to the screen and/or the logfile
     sub trace
     {
         my $level = shift;
@@ -36,12 +49,48 @@ my $logfile = "log.$time.txt";
         print {$log} @_
             if $level >= $loglevel;
     }
+
+    sub debug   { trace 0, @_ }
+    sub info    { trace 1, @_ }
+    sub warning { trace 2, @_ }
+    sub error   { trace 3, @_ }
+    sub report  { trace 4, @_ }
+}
+
+
+sub timestamp {
+    return strftime "%F-%H:%M:%S", localtime;
+}
+
+# This decides if a link should be spidered or just validated
+sub is_in_scope {
+    my $url = shift;
+    foreach my $exclusion (@exclusions) {
+        return 
+            if $url =~ /$exclusion/;
+    }
+    return 1;
+}
+
+# This decides if a link should be validated or not
+sub is_readable {
+    shift =~ /^https?:/;
+}
+
+sub canonical {
+    my ($url, $base) = @_;
+    $url =~ s!#[^/]*$!!; # remove section links.
+    $url = URI->new($url);
+    $url = $url->abs($base)
+        if $base;
+    $url = $url->canonical;
+    return $url;
 }
 
 ######################################################################
+# Option processing and configuration
 
-if (!@ARGV or $ARGV[0] =~ /^(--help|-h)$/) {
-    die <<USAGE;
+my $usage = <<USAGE;
 This script spiders web links, starting from URLs list as commandline
 arguments, or if the first argument is a filename, URLs listed in that
 file, one per line.
@@ -62,14 +111,26 @@ logfile named 'log.YY-MM-DD_hh_mm.txt' where YY, MM, DD, hh and mm are
 the current year, month, day, hour and minute, respectively.
 
 USAGE
-}
 
-my @seeds = @ARGV;
-die "No base URL specified\n"
+debug "command line:\n$0 @ARGV\n\n";
+
+my %opt;
+die "Failed to parse options:\n$usage"
+    unless GetOptions(
+        \%opt, 
+        qw(help exclude=s@)
+    );
+
+
+my @seeds = map { canonical $_ } @ARGV;
+die "No seed URLs specified\n"
     unless @seeds;
 
+# Ad an exclusion pattern for any URL which isn't a seed or some
+# extension of one.
+my $seeds_matcher = join "|", map { "\Q$_\E" } @seeds;
+@exclusions = (qr/^(?!$seeds_matcher)/, @{ $opt{exclude} || [] });
 
-trace 0, "command line:\n$0 @ARGV\n\n";
 
 # First get the seed urls specified, either from the command line
 # or from the config file ...
@@ -81,7 +142,7 @@ if ($seeds[0] !~ /^http:/) {
 
     open my $config, "<", "$seeds[0]"
         or die "Couldn't open confile file $seeds[0]: $!\n";
-    $seeds = <$config>;
+    @seeds = <$config>;
     close $config;
 
     chomp @seeds;
@@ -89,80 +150,22 @@ if ($seeds[0] !~ /^http:/) {
         if @seeds > 1;
 }
 
-my $base = shift @seeds;
-print "using the base URL:\n$base\n";
-if (@seeds) {
-    print "using the seed URLs:\n", join "\n",@seeds;
-}
-else {
-    print "no seed URLs";
-}
+print "using the seed URLs:\n", join "\n",@seeds;
 print "\n\n";
 
 ######################################################################
 
 # Mark all the seed URLs unvisited, to kick things off
 $unvisited{$_}++
-    foreach $base, @seeds;
+    foreach @seeds;
 
-
-######################################################################
-
-# This defines the get_links sub plus some private globals
-{
-    my $ua = LWP::UserAgent->new;
-    $ua->cookie_jar({ file => "$ENV{PWD}/.cookies.txt" });
-    push @{ $ua->requests_redirectable }, 'POST';
-
-    my $LX = HTML::LinkExtractor->new();
-
-    # $content = get_page $url
-    #
-    # Retrieves the page from the url given.
-    # if the link is broken, throws and exception
-    sub get_page {
-        my $url = shift;
-
-        # Create a request
-        my $req = HTTP::Request->new(GET => $url);
-
-        # Pass request to the user agent and get a response back
-        my $res = $ua->request($req);
-
-        # Check the outcome of the response
-        die "Failed to load $url: ", $res->status_line, "\n"
-            unless $res->is_success;
-
-        return $res->content;
-    }
-
-    # @links = get_links $page_content
-    #
-    # Returns a ref to an array of links.
-    # $link = { href => $href, _TEXT => $text}
-    sub get_links {
-        my $content = shift;
-        $LX->parse(\$content);
-        return $LX->links;
-    }
-}
-
-# This decides if a link should be spidered or just validated
-sub is_in_scope {
-    shift =~ /^$base/;
-}
-
-# This decides if a link should be validated or not
-sub is_readable {
-    shift =~ /^https?:/;
-}
 
 
 # This loops over the unvisited urls, adding more as they're found,
 # and removing them when visited.
 while(%unvisited) {
     my @keys = keys %unvisited;
-    trace 1,  "pages pending: ".@keys."\n";
+    info timestamp ." - pages pending: ".@keys."\n";
 
     foreach my $url (@keys) {
         # Remove this link from the 'unvisited' list
@@ -170,10 +173,11 @@ while(%unvisited) {
 
         # And add it to the 'visited' list, unless it's there already,
         # in which case we can skip it
-        next if $visited{$url}++;
+        next
+            if $visited{$url}++;
 
         # We don't validate non-http links (i.e. ftp://, mailto: etc.)
-        trace 0,  "skipping (not readable): $url\n" and next
+        debug  "skipping (not readable): $url\n" and next
             unless is_readable $url;
 
         # Pause so as not to overload the server
@@ -182,72 +186,119 @@ while(%unvisited) {
 
         # Get the page - list the link as broken if this fails
         # if the page is in scope, spider its links
-        trace 0, "--------\n";
-        trace 1, "getting $url... ";
+        debug "--------\n";
+        my $is_in_scope = is_in_scope $url;
+        my $response;
         eval {
-            my $content = get_page $url;
-
-            # We don't follow links outside of the base URL
-#            trace 0,  "skipping (outside of base URL): $href\n";
-            $links = is_in_scope($url)?
-                get_links($content) : [];
-            1;
+            my $method = $is_in_scope? 'GET' : 'HEAD';
+            my ($referrer) = @{$referrers{$url} || ['none']};
+            info "${method}-ing $url from $referrer";
+            my $request = HTTP::Request->new($method => $url);
+            $response = $ua->request($request);
         }
-        or do { # catch exceptions
-            trace 1,  "FAILED:\n$@\n";
-            push @broken, $url;
-            next;
+            or do { # catch exceptions - something unusal is wrong
+                push @broken, {
+                     code => -1,
+                     message => $@,
+                     url => $url,
+                };
+                error  "exception whilst getting $url: $@\n";
+                next;
+            };
+        
+        info " OK\n";
+        
+        if (!$response->is_success) {
+            push @broken, {
+                code => $response->code,
+                message => $response->message,
+                url => $url,
+            };
+        }            
+
+        next
+            unless $is_in_scope;
+
+        next
+            unless $response->content_type =~ m{^(text/html)$};
+
+        # Gather links in page
+        my $links;
+        eval {
+            my $content = $response->content;
+            $lx->parse(\$content);
+            $links = $lx->links; 
         }
+            or do {
+                # If $links is undefined, either there was an exception or 
+                # there are no links parsed for some reason.  Either way 
+                # we#re done with this page.
+                error "exception whilst parsing content of $url: $@"
+                    if $@;
+                next;
+            };
 
-        trace 1,  " OK\n";
-
+ 
         # Now process these links
         foreach my $link (@$links) {
-            # Get the URL
+            # Get the URL, skip it if it isn't a href or src
             my $href = $link->{href} || $link->{src};
-            next unless $href;
+            next
+                unless $href;
 
             # Convert the URL into a canonical URL
-            $href = URI->new($href)->abs($url)->canonical;
-            $href =~ s!#[^/]*$!!; # remove section links.
+            $href = canonical $href, $response->base;
 
             # Add links to the list of links still to follow
             push @{ $referrers{$href} }, $url;
 
-#            trace 0,  Dumper $link;#
-            trace 0,  "found: $href ";
-            trace 0, ("(visited)\n") and next
+#            debug  Dumper $link;#
+            debug  "found: $href ";
+            debug ("(visited)\n") and next
                 if $visited{$href};
             ++$unvisited{$href};
-            trace 0,  "\n";
+            debug  "\n";
         }
 
-        trace 0,  "\n";
+        debug  "\n";
     }
 }
 
-trace 1,  "Done, no more links\n";
+info timestamp. " - Done, no more links\n";
 
 # Convert the broken list, with hindsight, to a list
 # of pages linking to broken ones.
 my %defects;
-foreach my $link (@broken) {
-    my $referrers = $referrers{$link};
-    $defects{$_}{$link}++ foreach @$referrers;
+foreach my $breakage (@broken) {
+    my ($url, $code) = @$breakage{qw(url code)};
+    my $referrers = $referrers{$url};
+    $defects{$_}{$url}{$code}++
+        foreach @$referrers;
 }
 
-foreach my $page (sort keys %defects) {
-    trace 1,  "Links broken in $page:\n";
-    my $defects = $defects{$page};
-    foreach my $link (sort keys %$defects) {
-        my $errors = $defects->{$link};
-        foreach my $type (sort keys %$errors) {
-            my $count = $errors->{$type};
-            trace 1, sprintf("%4d error #%3ds following %s\n",
-                             $count, $type, $link);
+
+if (%defects) {
+    foreach my $page (sort keys %defects) {
+        report  "Links broken in $page:\n";
+        my $defects = $defects{$page};
+        foreach my $link (sort keys %$defects) {
+            my $errors = $defects->{$link};
+            foreach my $code (sort keys %$errors) {
+                my $count = $errors->{$code};
+                report sprintf(
+                    "%4d error #%d%s following %s\n",
+                    $count,
+                    $code,
+                    ($count==1? '' : 's'),
+                    $link,
+                );
+            }
         }
+        report "\n";
     }
-    trace 1,  "\n";
+}
+else {
+    report "No broken links found\n";
 }
 
-trace 1, "Goodbye\n";
+info timestamp. " - Goodbye\n";
