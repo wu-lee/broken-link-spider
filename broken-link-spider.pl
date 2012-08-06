@@ -192,7 +192,8 @@ while(%unvisited) {
         eval {
             my $method = $is_in_scope? 'GET' : 'HEAD';
             my ($referrer) = @{$referrers{$url} || ['none']};
-            info "${method}-ing $url from $referrer";
+            my $pending = keys %unvisited;
+            info "${method}-ing $url from $referrer ($pending pending)";
             my $request = HTTP::Request->new($method => $url);
             $response = $ua->request($request);
         }
@@ -206,11 +207,12 @@ while(%unvisited) {
                 next;
             };
         
-        info " OK\n";
+        my $code = $response->code;
+        info " OK ($code)\n";
         
         if (!$response->is_success) {
             push @broken, {
-                code => $response->code,
+                code => $code,
                 message => $response->message,
                 url => $url,
             };
